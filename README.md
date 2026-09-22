@@ -21,8 +21,10 @@ Requires OpenCode **2.0.7** and its built-in OpenAI integration. Both accounts m
 Authenticate Git with GitHub, then install the plugin:
 
 ```sh
-opencode plugin add github:Paliago/opencode-openai-accounts
+npm_config_min_release_age=0 opencode plugin add github:Paliago/opencode-openai-accounts
 ```
+
+The command disables npm's release-age restriction only for this installation. This is needed when your global npm configuration delays recently published packages.
 
 Open or restart OpenCode, then use `/connect` to add each ChatGPT account. OpenCode installs the plugin globally and checks the `main` branch for updates. To apply an available update immediately:
 
