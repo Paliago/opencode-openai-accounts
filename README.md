@@ -18,18 +18,18 @@ Choose the account and model together. Sessions can use different accounts concu
 
 Requires OpenCode **2.0.7** and its built-in OpenAI integration. Both accounts must already be saved through `/connect` using a ChatGPT browser or headless login. API-key and environment connections are excluded.
 
-Configure an SSH key for GitHub, then install the plugin:
+Install the plugin from GitHub:
 
 ```sh
-npm_config_min_release_age=0 opencode plugin add 'git+ssh://git@github.com/Paliago/opencode-openai-accounts.git#main'
+npm_config_min_release_age=0 opencode plugin add github:Paliago/opencode-openai-accounts
 ```
 
-The SSH URL lets OpenCode access the private repository without using GitHub's unauthenticated tarball endpoint. The command disables npm's release-age restriction only for this installation, which is needed when your global npm configuration delays recently published packages.
+The command disables npm's release-age restriction only for this installation, which is needed when your global npm configuration delays recently published packages.
 
 Open or restart OpenCode, then use `/connect` to add each ChatGPT account. OpenCode installs the plugin globally and checks the `main` branch for updates. To apply an available update immediately:
 
 ```sh
-opencode plugin update 'git+ssh://git@github.com/Paliago/opencode-openai-accounts.git#main'
+opencode plugin update github:Paliago/opencode-openai-accounts
 ```
 
 ## Development
