@@ -1,0 +1,21 @@
+{
+  "name": "opencode-openai-accounts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Account-specific OpenAI providers for OpenCode V2",
+  "exports": "./index.ts",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test index.test.ts"
+  },
+  "dependencies": {
+    "@opencode/ai": "2.0.7",
+    "@opencode/plugin": "2.0.7",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "typescript": "~5.8.2"
+  }
+}
