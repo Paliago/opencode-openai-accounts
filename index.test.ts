@@ -1,6 +1,9 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Credential, Integration, Model, Provider } from "@opencode/plugin"
+import { Agent } from "@opencode/schema/agent"
+import { Session } from "@opencode/schema/session"
+import type { SessionContext } from "@opencode/plugin/promise/session"
 import type { ProviderEditor, ProviderRecord } from "@opencode/plugin/promise/provider"
 import { Effect } from "effect"
 import { Headers } from "effect/unstable/http"
@@ -23,7 +26,7 @@ function credential(accountID: string, access = `${accountID}-token`) {
 function environment() {
   const providerID = Provider.ID.make("openai")
   const source: ProviderRecord = {
-    provider: { ...Provider.Info.empty(providerID), transport: "websocket" },
+    provider: { ...Provider.Info.empty(providerID), settings: { transport: "websocket" } },
     models: new Map(["gpt-6-astra", "gpt-5.4", "gpt-5.5-pro", "gpt-5.6"].map((id) => [id, {
       ...Model.Info.default(providerID, Model.ID.make(id)),
       variants: [{ id: Model.VariantID.make("high"), settings: { reasoningEffort: "high" } }],
@@ -36,6 +39,7 @@ function environment() {
     ["cred_key", Credential.Key.make({ type: "key", key: "api-key" })],
   ])
   const calls: string[] = []
+  const hooks = new Map<string, (event: SessionContext) => Promise<void> | void>()
   const resolution: { error?: Error } = {}
   const labels = new Map([...credentials.keys()].map((id) => [id, id.slice(5)]))
   let eventController: ReadableStreamDefaultController<Event> | undefined
@@ -63,7 +67,7 @@ function environment() {
           id: "openai",
           name: "OpenAI",
           methods: [],
-          connections: [...credentials.keys()].map((id) => ({ type: "credential", id, label: labels.get(id) ?? id })),
+          connections: [...credentials.keys()].map((id) => ({ type: "credential", method: credentials.get(id)?.type === "oauth" ? "oauth" : "key", id, label: labels.get(id) ?? id })),
         },
       }),
       connection: {
@@ -89,6 +93,12 @@ function environment() {
         notification.resolve()
       },
     },
+    session: {
+      hook: async (name, callback) => {
+        hooks.set(name, callback)
+        return { dispose: async () => { hooks.delete(name) } }
+      },
+    },
     event: {
       subscribe(options) {
         options?.signal?.addEventListener("abort", () => eventController?.close(), { once: true })
@@ -109,7 +119,7 @@ function environment() {
     eventController.enqueue({ type: "credential.updated", id: "evt_changed", created: Date.now(), data: {} })
     await notification.promise
   }
-  return { context, providers, credentials, calls, selected, resolution, labels, changed }
+  return { context, providers, credentials, calls, selected, resolution, labels, changed, hooks }
 }
 
 function authorize(selected: ReturnType<typeof model>, url = "https://chatgpt.com/backend-api/codex/responses") {
@@ -223,4 +233,31 @@ test("credentials are withheld from other endpoints and unloaded bindings", asyn
     await cleanup()
   }
   await assert.rejects(authorize(personal), /binding was removed/)
+})
+
+test("all account request kinds omit output limits without changing other providers", async () => {
+  const state = environment()
+  const cleanup = await setup(state.context)
+  try {
+    assert.deepEqual([...state.hooks.keys()], ["context", "compaction", "generate", "title"])
+    for (const hook of state.hooks.values()) {
+      for (const providerID of ["openai-cred_personal", "openai-cred_stampen", "openai", "anthropic"]) {
+        const event: SessionContext = {
+          sessionID: Session.ID.make("session_output_limit"),
+          agent: Agent.ID.make("build"),
+          tools: {},
+          model: { providerID: Provider.ID.make(providerID), id: Model.ID.make("gpt-6-astra") },
+          system: [],
+          messages: [],
+          options: { maxTokens: 8192, reasoningEffort: "high" },
+        }
+        await hook(event)
+        assert.equal(event.options.maxTokens, providerID.startsWith("openai-cred_") ? undefined : 8192)
+        assert.equal(event.options.reasoningEffort, "high")
+      }
+    }
+  } finally {
+    await cleanup()
+  }
+  assert.equal(state.hooks.size, 0)
 })

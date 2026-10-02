@@ -10,8 +10,8 @@
     "test": "node --experimental-strip-types --test index.test.ts"
   },
   "dependencies": {
-    "@opencode/ai": "2.0.7",
-    "@opencode/plugin": "2.0.7",
+    "@opencode/ai": "2.0.22",
+    "@opencode/plugin": "2.0.22",
     "effect": "4.0.0-rc.112"
   },
   "devDependencies": {

@@ -2,6 +2,8 @@ import { AIError, AuthenticationError, LanguageModel } from "@opencode/ai"
 import * as OpenAI from "@opencode/ai/providers/openai"
 import { Auth } from "@opencode/ai/route"
 import { Credential, Model, Plugin, Provider } from "@opencode/plugin"
+import type { ModelHooks } from "@opencode/plugin/promise/registration"
+import type { SessionHooks, SessionRequest } from "@opencode/plugin/promise/session"
 import { Effect } from "effect"
 import { Headers } from "effect/unstable/http"
 
@@ -9,16 +11,15 @@ const baseURL = "https://chatgpt.com/backend-api/codex"
 
 type Context = {
   app: Plugin.Context["app"]
-  integration: Pick<Plugin.Context["integration"], "get" | "connection">
+  integration: Pick<Plugin.Context["integration"], "get"> & {
+    connection: Pick<Plugin.Context["integration"]["connection"], "active" | "resolve">
+  }
   provider: Pick<Plugin.Context["provider"], "transform" | "reload">
+  session: { hook: ModelHooks<Pick<SessionHooks, "context" | "compaction" | "generate" | "title">> }
   event: Plugin.Context["event"]
 }
 
-type SavedConnection = {
-  type: "credential"
-  id: string
-  label: string
-}
+type SavedConnection = Extract<Parameters<Plugin.Context["integration"]["connection"]["resolve"]>[0], { type: "credential" }>
 
 type Binding = {
   resolve: () => Promise<Credential.Value | undefined>
@@ -172,9 +173,12 @@ export async function setup(context: Context) {
           canonical: Provider.ID.make("openai"),
           activation: "enabled",
           package: entrypoint.href,
-          transport: source.provider.transport ?? "websocket",
-          compaction: source.provider.compaction,
-          settings: { baseURL, openAIAccountBinding: bindingID },
+          settings: {
+            ...source.provider.settings,
+            transport: source.provider.settings?.transport ?? "websocket",
+            baseURL,
+            openAIAccountBinding: bindingID,
+          },
         },
         models: [...source.models.values()].filter(isChatGPTModel).map((item) => ({
           ...item,
@@ -190,6 +194,18 @@ export async function setup(context: Context) {
     }
   })
 
+  const omitOutputLimit = (event: SessionRequest) => {
+    if (event.model.providerID.startsWith("openai-") && accounts.has(event.model.providerID.slice(7))) {
+      delete event.options.maxTokens
+    }
+  }
+  const hooks = await Promise.all([
+    context.session.hook("context", omitOutputLimit),
+    context.session.hook("compaction", omitOutputLimit),
+    context.session.hook("generate", omitOutputLimit),
+    context.session.hook("title", omitOutputLimit),
+  ])
+
   const watching = (async () => {
     for await (const event of context.event.subscribe({ signal: controller.signal })) {
       if (event.type !== "credential.updated" && event.type !== "credential.switched") continue
@@ -204,6 +220,7 @@ export async function setup(context: Context) {
     controller.abort()
     await watching
     await registration.dispose()
+    await Promise.all(hooks.map((hook) => hook.dispose()))
     for (const account of accounts.values()) runtime.bindings.delete(account.bindingID)
   }
 }

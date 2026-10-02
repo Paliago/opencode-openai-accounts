@@ -16,7 +16,7 @@ Choose the account and model together. Sessions can use different accounts concu
 
 ## Install
 
-Requires OpenCode **2.0.7** and its built-in OpenAI integration. Both accounts must already be saved through `/connect` using a ChatGPT browser or headless login. API-key and environment connections are excluded.
+Requires OpenCode **2.0.22** and its built-in OpenAI integration. Both accounts must already be saved through `/connect` using a ChatGPT browser or headless login. API-key and environment connections are excluded.
 
 Install the plugin from GitHub:
 
@@ -53,7 +53,7 @@ To load the checkout instead of the installed package, add its directory to the 
 }
 ```
 
-Keep your other plugin entries. Configure the **directory**, not `index.ts`; OpenCode 2.0.7's loader requires a directory here. Reload the project's configuration after adding it, and remove the installed package entry to avoid loading the plugin twice.
+Keep your other plugin entries. Configure the **directory**, not `index.ts`. Reload the project's configuration after adding it, and remove the installed package entry to avoid loading the plugin twice.
 
 For local development, this checkout has an ignored `.opencode/opencode.jsonc` that enables the plugin only in this project. OpenCode clients working here can already select the account-specific providers.
 
@@ -66,13 +66,14 @@ For local development, this checkout has an ignored `.opencode/opencode.jsonc` t
 - Concurrent requests for the same account share an in-progress credential resolution. Different accounts resolve independently.
 - A missing, expired, or unusable credential fails the request. It never falls back to another saved account or `OPENAI_API_KEY`.
 - The native OpenAI runtime handles HTTP, WebSocket, and compaction requests. The adapter supplies account-specific authentication and restricts credentials to the ChatGPT Codex endpoint.
+- Account requests omit the output-token limit rejected by ChatGPT, including session prompts, compaction, transient generation, and titles.
 - The original `OpenAI` provider remains available with its usual active-account behavior.
 
 The account entries inherit OpenAI model definitions and reasoning variants. Subscription pricing and context limits follow OpenCode 2.0.7's built-in ChatGPT policy. Model eligibility is currently the same static policy, rather than a per-account entitlement lookup.
 
 ## Verification
 
-`npm test` uses Node's built-in test runner to check catalog updates, concurrent account isolation, refreshed credentials, failure behavior, endpoint restrictions, and cleanup. No network credentials are needed for those checks.
+`npm test` uses Node's built-in test runner to check catalog updates, concurrent account isolation, refreshed credentials, failure behavior, endpoint restrictions, output-limit omission, and cleanup. No network credentials are needed for those checks.
 
 During development on OpenCode 2.0.7, both real saved accounts successfully completed concurrent transient generation requests and normal session prompts through their own provider entries. The temporary verification sessions were removed afterward.
 
