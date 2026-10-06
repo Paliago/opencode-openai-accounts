@@ -4,12 +4,12 @@ An OpenCode V2 plugin that gives every saved ChatGPT account its own provider in
 
 ```text
 OpenAI — Elva
-  GPT-6 Astra
-  GPT-5.6 Luna
+  GPT-6.1 Sol — Elva
+  GPT-6.1 Sol Fast — Elva
 
 OpenAI — Stampen
-  GPT-6 Astra
-  GPT-5.6 Luna
+  GPT-6.1 Sol — Stampen
+  GPT-6.1 Sol Fast — Stampen
 ```
 
 Choose the account and model together. Sessions can use different accounts concurrently; the plugin never changes OpenCode's active OpenAI account.
@@ -59,7 +59,7 @@ For local development, this checkout has an ignored `.opencode/opencode.jsonc` t
 
 ## Behavior
 
-- Provider names use the saved account labels. Rename them through `/connect`.
+- Provider names and model-name suffixes use the saved account labels. Renaming an account through `/connect` updates both, so model pickers such as Zeron's can identify the account even when provider headings show IDs.
 - Provider IDs use credential IDs: `openai-<credentialID>/<modelID>`. Renaming an account preserves existing model selections.
 - Adding or removing an account updates the catalog. Reconnecting creates a new credential ID, so select its new provider in existing sessions.
 - Credentials remain in OpenCode's database. Each request resolves its bound credential through OpenCode, including automatic OAuth refresh.

@@ -40,6 +40,7 @@ function environment() {
     provider: { ...Provider.Info.empty(providerID), settings: { transport: "websocket" } },
     models: new Map(["gpt-6-astra", "gpt-5.4", "gpt-5.5-pro", "gpt-5.6"].map((id) => [id, {
       ...Model.Info.default(providerID, Model.ID.make(id)),
+      name: id === "gpt-6-astra" ? "GPT-6 Astra" : id,
       variants: [{ id: Model.VariantID.make("high"), settings: { reasoningEffort: "high" } }],
     }])),
   }
@@ -130,7 +131,7 @@ function environment() {
     eventController.enqueue({ type: "credential.updated", id: "evt_changed", created: Date.now(), data: {} })
     await notification.promise
   }
-  return { context, providers, credentials, calls, selected, resolution, labels, changed, hooks }
+  return { context, providers, credentials, calls, selected, resolution, labels, changed, hooks, source }
 }
 
 function authorize(selected: ReturnType<typeof model>, url = "https://chatgpt.com/backend-api/codex/responses") {
@@ -151,12 +152,21 @@ function authorize(selected: ReturnType<typeof model>, url = "https://chatgpt.co
 
 test("saved ChatGPT accounts become separate providers with their model variants", async (t) => {
   const state = environment()
+  const source = structuredClone(state.source)
   t.after(await setup(state.context))
+  assert.deepEqual([...state.providers.keys()], ["openai-cred_personal", "openai-cred_stampen"])
   assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["OpenAI — personal", "OpenAI — stampen"])
   for (const entry of state.providers.values()) {
     assert.deepEqual([...entry.models.keys()], ["gpt-6-astra"])
-    assert.equal(entry.models.get("gpt-6-astra")?.variants?.[0]?.id, "high")
+    const item = entry.models.get("gpt-6-astra")
+    assert.ok(item)
+    assert.equal(item.name, `GPT-6 Astra — ${state.labels.get(entry.provider.id.slice(7))}`)
+    assert.equal(item.id, "gpt-6-astra")
+    assert.equal(item.modelID, "gpt-6-astra")
+    assert.equal(item.providerID, entry.provider.id)
+    assert.equal(item.variants?.[0]?.id, "high")
   }
+  assert.deepEqual(state.source, source)
   const catalog = JSON.stringify([...state.providers.values()].map((entry) => ({
     provider: entry.provider,
     models: [...entry.models.values()],
@@ -214,12 +224,22 @@ test("credential refresh failures do not expose credential material", async (t) 
 
 test("account additions, renames, and removals update the catalog without rebinding sessions", { timeout: 2000 }, async (t) => {
   const state = environment()
+  const source = structuredClone(state.source)
   t.after(await setup(state.context))
   const personal = state.selected("personal")
   state.labels.set("cred_personal", "Private")
   state.credentials.set("cred_additional", credential("additional"))
   await state.changed()
   assert.equal(state.providers.get("openai-cred_personal")?.provider.name, "OpenAI — Private")
+  assert.equal(state.providers.get("openai-cred_personal")?.provider.id, "openai-cred_personal")
+  const renamed = state.providers.get("openai-cred_personal")?.models.get("gpt-6-astra")
+  assert.ok(renamed)
+  assert.equal(renamed.name, "GPT-6 Astra — Private")
+  assert.equal(renamed.id, "gpt-6-astra")
+  assert.equal(renamed.modelID, "gpt-6-astra")
+  assert.equal(renamed.providerID, "openai-cred_personal")
+  assert.equal(state.providers.get("openai-cred_stampen")?.models.get("gpt-6-astra")?.name, "GPT-6 Astra — stampen")
+  assert.deepEqual(state.source, source)
   assert.equal(state.providers.size, 3)
   assert.equal((await authorize(personal)).authorization, "Bearer personal-token")
 

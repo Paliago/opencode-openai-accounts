@@ -239,6 +239,7 @@ export async function setup(context: Context) {
         },
         models: [...source.models.values()].filter(filter).map((item) => ({
           ...item,
+          name: `${item.name} — ${connection.label}`,
           providerID: id,
           canonical: Provider.ID.make("openai"),
           package: entrypoint.href,
