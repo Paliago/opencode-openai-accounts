@@ -7,7 +7,28 @@ import type { SessionHooks, SessionRequest } from "@opencode/plugin/promise/sess
 import { Effect } from "effect"
 import { Headers } from "effect/unstable/http"
 
-const baseURL = "https://chatgpt.com/backend-api/codex"
+const codexBaseURL = "https://chatgpt.com/backend-api/codex"
+const tokenBaseURL = "https://api.openai.com/v1"
+
+// Mirrors OpenCode 2.0.26's token-sharing allowlist (opencode.provider.chatgpt).
+const tokenSharingModels = new Set([
+  "gpt-5.5",
+  "gpt-5.5-fast",
+  "gpt-5.6-luna",
+  "gpt-5.6-luna-fast",
+  "gpt-5.6-sol",
+  "gpt-5.6-sol-fast",
+  "gpt-5.6-terra",
+  "gpt-5.6-terra-fast",
+  "gpt-6-astra",
+  "gpt-6-astra-fast",
+  "gpt-6-luna",
+  "gpt-6-luna-fast",
+  "gpt-6-sol",
+  "gpt-6-sol-fast",
+  "gpt-6.1-sol",
+  "gpt-6.1-sol-fast",
+])
 
 type Context = {
   app: Plugin.Context["app"]
@@ -24,6 +45,8 @@ type SavedConnection = Extract<Parameters<Plugin.Context["integration"]["connect
 type Binding = {
   resolve: () => Promise<Credential.Value | undefined>
   version: string
+  kind: "codex" | "token"
+  baseURL: string
 }
 
 type Runtime = {
@@ -55,9 +78,17 @@ function resolveCredential(context: Context, connection: SavedConnection) {
   return request
 }
 
-function isChatGPT(value: Credential.Value | undefined): value is Credential.OAuth {
+function isCodex(value: Credential.Value | undefined): boolean {
   return value?.type === "oauth" &&
     (value.methodID === "chatgpt-browser" || value.methodID === "chatgpt-headless")
+}
+
+function isTokenSharing(value: Credential.Value | Credential.OAuth | undefined): boolean {
+  return value?.type === "oauth" && value.methodID === "chatgpt-token-sharing"
+}
+
+function isChatGPT(value: Credential.Value | undefined): value is Credential.OAuth {
+  return isCodex(value) || isTokenSharing(value)
 }
 
 function authenticationError(message: string) {
@@ -67,22 +98,28 @@ function authenticationError(message: string) {
 /** OpenCode native provider entrypoint. Credentials are resolved at request time. */
 export function model(modelID: string, settings: OpenAI.Settings) {
   const { openAIAccountBinding, ...options } = settings
-  if (typeof openAIAccountBinding !== "string" || !runtime.bindings.has(openAIAccountBinding)) {
+  const initial = typeof openAIAccountBinding === "string" ? runtime.bindings.get(openAIAccountBinding) : undefined
+  if (!initial) {
     throw new Error("OpenAI account binding is unavailable. Reload the plugin and select the account again.")
   }
 
-  const native = OpenAI.model(modelID, { ...options, baseURL })
+  const native = OpenAI.model(modelID, { ...options, baseURL: initial.baseURL })
   const auth = Auth.custom((input) => Effect.gen(function* () {
+    const binding = typeof openAIAccountBinding === "string" ? runtime.bindings.get(openAIAccountBinding) : undefined
+    if (!binding) {
+      return yield* Effect.fail(authenticationError("OpenAI account binding was removed. Select a connected account."))
+    }
     const destination = new URL(input.url)
-    if (destination.origin !== "https://chatgpt.com" ||
+    if (binding.kind === "token") {
+      if (destination.origin !== "https://api.openai.com" ||
+        !destination.pathname.startsWith("/v1/") || destination.username || destination.password) {
+        return yield* Effect.fail(authenticationError("Refusing to send a ChatGPT credential to a different endpoint."))
+      }
+    } else if (destination.origin !== "https://chatgpt.com" ||
       !destination.pathname.startsWith("/backend-api/codex/") || destination.username || destination.password) {
       return yield* Effect.fail(authenticationError("Refusing to send a ChatGPT credential to a different endpoint."))
     }
 
-    const binding = runtime.bindings.get(openAIAccountBinding)
-    if (!binding) {
-      return yield* Effect.fail(authenticationError("OpenAI account binding was removed. Select a connected account."))
-    }
     const credential = yield* Effect.tryPromise({
       try: () => binding.resolve(),
       catch: () => authenticationError("Could not refresh the selected OpenAI account. Reconnect it through /connect."),
@@ -90,15 +127,23 @@ export function model(modelID: string, settings: OpenAI.Settings) {
     if (!isChatGPT(credential) || !credential.access || credential.expires <= Date.now()) {
       return yield* Effect.fail(authenticationError("The selected ChatGPT account is unavailable. Reconnect it through /connect."))
     }
-    const accountID = credential.metadata?.accountID
-    if (typeof accountID !== "string" || !accountID) {
-      return yield* Effect.fail(authenticationError("The selected ChatGPT credential has no account ID. Reconnect it through /connect."))
-    }
 
     let headers = input.headers
     for (const name of ["authorization", "api-key", "x-api-key", "cookie", "openai-organization", "openai-project", "chatgpt-account-id"]) {
       headers = Headers.remove(headers, name)
     }
+    if (isTokenSharing(credential)) {
+      return Headers.setAll(headers, {
+        authorization: `Bearer ${credential.access}`,
+        "user-agent": headers["user-agent"] ?? `opencode/${binding.version}`,
+        ...(headers["x-session-id"] ? { "session-id": headers["x-session-id"] } : {}),
+      })
+    }
+    const accountID = credential.metadata?.accountID
+    if (typeof accountID !== "string" || !accountID) {
+      return yield* Effect.fail(authenticationError("The selected ChatGPT credential has no account ID. Reconnect it through /connect."))
+    }
+
     return Headers.setAll(headers, {
       authorization: `Bearer ${credential.access}`,
       "chatgpt-account-id": accountID,
@@ -116,6 +161,12 @@ function isPro(body: Readonly<Record<string, unknown>> | undefined) {
   return typeof reasoning === "object" && reasoning !== null && "mode" in reasoning && reasoning.mode === "pro"
 }
 
+function isTokenSharingModel(model: Model.Info) {
+  if (!model.enabled || isPro(model.body)) return false
+  const id = model.modelID ?? model.id
+  return tokenSharingModels.has(id)
+}
+
 function isChatGPTModel(model: Model.Info) {
   if (!model.enabled || isPro(model.body)) return false
   const id = model.modelID ?? model.id
@@ -129,14 +180,14 @@ function isChatGPTModel(model: Model.Info) {
 
 /** Register one provider per saved ChatGPT account and follow account changes. */
 export async function setup(context: Context) {
-  let accounts = new Map<string, { connection: SavedConnection; bindingID: string }>()
+  let accounts = new Map<string, { connection: SavedConnection; bindingID: string; kind: Binding["kind"]; baseURL: string }>()
   const controller = new AbortController()
   const entrypoint = new URL(import.meta.url)
   entrypoint.searchParams.set("account-runtime", crypto.randomUUID())
 
   async function synchronize() {
     const { data } = await context.integration.get({ integrationID: "openai" })
-    const next = new Map<string, { connection: SavedConnection; bindingID: string }>()
+    const next = new Map<string, { connection: SavedConnection; bindingID: string; kind: Binding["kind"]; baseURL: string }>()
     for (const connection of data.connections) {
       if (connection.type !== "credential") continue
       let credential: Credential.Value | undefined
@@ -147,12 +198,16 @@ export async function setup(context: Context) {
         continue
       }
       if (!isChatGPT(credential)) continue
+      const kind: Binding["kind"] = isTokenSharing(credential) ? "token" : "codex"
+      const baseURL = kind === "token" ? tokenBaseURL : codexBaseURL
       const bindingID = accounts.get(connection.id)?.bindingID ?? crypto.randomUUID()
       runtime.bindings.set(bindingID, {
         resolve: () => resolveCredential(context, connection),
         version: context.app.version,
+        kind,
+        baseURL,
       })
-      next.set(connection.id, { connection, bindingID })
+      next.set(connection.id, { connection, bindingID, kind, baseURL })
     }
     for (const [id, account] of accounts) {
       if (!next.has(id)) runtime.bindings.delete(account.bindingID)
@@ -164,8 +219,9 @@ export async function setup(context: Context) {
   const registration = await context.provider.transform((editor) => {
     const source = editor.get("openai")
     if (!source) return
-    for (const { connection, bindingID } of accounts.values()) {
+    for (const { connection, bindingID, kind, baseURL } of accounts.values()) {
       const id = Provider.ID.make(`openai-${connection.id}`)
+      const filter = kind === "token" ? isTokenSharingModel : isChatGPTModel
       editor.add({
         info: {
           ...Provider.Info.empty(id),
@@ -175,19 +231,20 @@ export async function setup(context: Context) {
           package: entrypoint.href,
           settings: {
             ...source.provider.settings,
-            transport: source.provider.settings?.transport ?? "websocket",
+            transport: kind === "token" ? "http" : (source.provider.settings?.transport ?? "websocket"),
             baseURL,
+            ...(kind === "token" ? { compaction: { type: "summary" } } : {}),
             openAIAccountBinding: bindingID,
           },
         },
-        models: [...source.models.values()].filter(isChatGPTModel).map((item) => ({
+        models: [...source.models.values()].filter(filter).map((item) => ({
           ...item,
           providerID: id,
           canonical: Provider.ID.make("openai"),
           package: entrypoint.href,
           settings: { ...item.settings, baseURL, openAIAccountBinding: bindingID },
           cost: [],
-          limit: { ...item.limit, context: 400_000, input: 272_000 },
+          limit: kind === "token" ? item.limit : { ...item.limit, context: 400_000, input: 272_000 },
           variants: item.variants?.filter((variant) => !isPro(variant.body)),
         })),
       })

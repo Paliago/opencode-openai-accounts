@@ -16,7 +16,7 @@ Choose the account and model together. Sessions can use different accounts concu
 
 ## Install
 
-Requires OpenCode **2.0.22** and its built-in OpenAI integration. Both accounts must already be saved through `/connect` using a ChatGPT browser or headless login. API-key and environment connections are excluded.
+Requires OpenCode **2.0.22+** and its built-in OpenAI integration. Accounts must already be saved through `/connect` using ChatGPT sign-in (`chatgpt-token-sharing`, the current default) or a legacy Codex browser/device login (`chatgpt-browser`, `chatgpt-headless`). API-key and environment connections are excluded. If a saved token fails to refresh (for example HTTP 400 from the OAuth endpoint), reconnect it through `/connect`.
 
 Install the plugin from GitHub:
 
@@ -65,7 +65,10 @@ For local development, this checkout has an ignored `.opencode/opencode.jsonc` t
 - Credentials remain in OpenCode's database. Each request resolves its bound credential through OpenCode, including automatic OAuth refresh.
 - Concurrent requests for the same account share an in-progress credential resolution. Different accounts resolve independently.
 - A missing, expired, or unusable credential fails the request. It never falls back to another saved account or `OPENAI_API_KEY`.
-- The native OpenAI runtime handles HTTP, WebSocket, and compaction requests. The adapter supplies account-specific authentication and restricts credentials to the ChatGPT Codex endpoint.
+- The native OpenAI runtime handles HTTP, WebSocket, and compaction requests. The adapter supplies account-specific authentication and restricts each credential to its own endpoint:
+  - Legacy Codex logins (`chatgpt-browser`, `chatgpt-headless`) use `https://chatgpt.com/backend-api/codex` with `chatgpt-account-id`, `originator`, and Codex beta headers.
+  - Current ChatGPT sign-ins (`chatgpt-token-sharing`) use `https://api.openai.com/v1` with Bearer auth only (no account ID header, following OpenCode 2.0.26's `opencode.provider.chatgpt` policy).
+- Token-sharing providers allow only OpenCode's token-sharing model allowlist (`gpt-5.5`, `gpt-5.6-luna/sol/terra` and `fast` variants, `gpt-6-astra/luna/sol` and `fast` variants, `gpt-6.1-sol`/`fast`); Codex providers use the legacy Codex eligibility policy. Both set `cost: []` and strip `pro` reasoning variants.
 - Account requests omit the output-token limit rejected by ChatGPT, including session prompts, compaction, transient generation, and titles.
 - The original `OpenAI` provider remains available with its usual active-account behavior.
 

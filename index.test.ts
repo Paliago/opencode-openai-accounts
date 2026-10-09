@@ -23,6 +23,17 @@ function credential(accountID: string, access = `${accountID}-token`) {
   })
 }
 
+function tokenCredential(accountID: string, access = `${accountID}-token`) {
+  return Credential.OAuth.make({
+    type: "oauth",
+    methodID: Integration.MethodID.make("chatgpt-token-sharing"),
+    access,
+    refresh: `${accountID}-refresh`,
+    expires: Date.now() + 3_600_000,
+    metadata: { clientID: "test-client", scopes: ["openid", "chatgpt.tokens.use.direct"] },
+  })
+}
+
 function environment() {
   const providerID = Provider.ID.make("openai")
   const source: ProviderRecord = {
@@ -260,4 +271,51 @@ test("all account request kinds omit output limits without changing other provid
     await cleanup()
   }
   assert.equal(state.hooks.size, 0)
+})
+
+test("token-sharing accounts become providers without an account ID", async (t) => {
+  const state = environment()
+  state.credentials.set("cred_personal", tokenCredential("personal"))
+  state.credentials.delete("cred_stampen")
+  t.after(await setup(state.context))
+  assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["OpenAI — personal"])
+  const entry = state.providers.get("openai-cred_personal")
+  assert.ok(entry)
+  assert.equal(entry.provider.settings?.baseURL, "https://api.openai.com/v1")
+  assert.equal(entry.provider.settings?.transport, "http")
+  assert.deepEqual([...entry.models.keys()], ["gpt-6-astra"])
+
+  const selected = entry.models.get("gpt-6-astra")
+  assert.ok(selected)
+  const token = model(selected.id, { ...entry.provider.settings, ...selected.settings })
+  const headers = await authorize(token, "https://api.openai.com/v1/responses")
+  assert.equal(headers.authorization, "Bearer personal-token")
+  assert.equal(headers["chatgpt-account-id"], undefined)
+  assert.equal(headers.originator, undefined)
+  await assert.rejects(authorize(token), /different endpoint/)
+  await assert.rejects(authorize(token, "https://chatgpt.com/backend-api/codex/responses"), /different endpoint/)
+})
+
+test("mixed codex and token-sharing accounts use their own endpoints", async (t) => {
+  const state = environment()
+  state.credentials.set("cred_personal", tokenCredential("personal"))
+  t.after(await setup(state.context))
+  assert.equal(state.providers.size, 2)
+  const tokenEntry = state.providers.get("openai-cred_personal")
+  const codexEntry = state.providers.get("openai-cred_stampen")
+  assert.ok(tokenEntry)
+  assert.ok(codexEntry)
+  assert.equal(tokenEntry.provider.settings?.baseURL, "https://api.openai.com/v1")
+  assert.equal(codexEntry.provider.settings?.baseURL, "https://chatgpt.com/backend-api/codex")
+
+  const tokenModel = tokenEntry.models.get("gpt-6-astra")
+  const codexModel = codexEntry.models.get("gpt-6-astra")
+  assert.ok(tokenModel)
+  assert.ok(codexModel)
+  const token = model(tokenModel.id, { ...tokenEntry.provider.settings, ...tokenModel.settings })
+  const codex = model(codexModel.id, { ...codexEntry.provider.settings, ...codexModel.settings })
+  assert.equal((await authorize(token, "https://api.openai.com/v1/responses")).authorization, "Bearer personal-token")
+  assert.equal((await authorize(codex)).authorization, "Bearer stampen-token")
+  await assert.rejects(authorize(token), /different endpoint/)
+  await assert.rejects(authorize(codex, "https://api.openai.com/v1/responses"), /different endpoint/)
 })
