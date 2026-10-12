@@ -16,7 +16,7 @@ Choose the account and model together. Sessions can use different accounts concu
 
 ## Install
 
-Requires OpenCode **2.0.22+** and its built-in OpenAI integration. Accounts must already be saved through `/connect` using ChatGPT sign-in (`chatgpt-token-sharing`, the current default) or a legacy Codex browser/device login (`chatgpt-browser`, `chatgpt-headless`). API-key and environment connections are excluded. If a saved token fails to refresh (for example HTTP 400 from the OAuth endpoint), reconnect it through `/connect`.
+Requires OpenCode **2.0.27+** and its built-in OpenAI integration. Accounts must already be saved through `/connect` using ChatGPT sign-in (`chatgpt-token-sharing`, the current default) or a legacy Codex browser/device login (`chatgpt-browser`, `chatgpt-headless`). API-key and environment connections are excluded. If a saved token fails to refresh (for example HTTP 400 from the OAuth endpoint), reconnect it through `/connect`.
 
 Install the plugin from GitHub:
 

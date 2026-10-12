@@ -6,7 +6,7 @@ import { Session } from "@opencode/schema/session"
 import type { SessionContext } from "@opencode/plugin/promise/session"
 import type { ProviderEditor, ProviderRecord } from "@opencode/plugin/promise/provider"
 import { Effect } from "effect"
-import { Headers } from "effect/unstable/http"
+import { Headers } from "effect/http"
 import { model, setup } from "./index.ts"
 
 type Context = Parameters<typeof setup>[0]

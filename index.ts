@@ -5,7 +5,7 @@ import { Credential, Model, Plugin, Provider } from "@opencode/plugin"
 import type { ModelHooks } from "@opencode/plugin/promise/registration"
 import type { SessionHooks, SessionRequest } from "@opencode/plugin/promise/session"
 import { Effect } from "effect"
-import { Headers } from "effect/unstable/http"
+import { Headers } from "effect/http"
 
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
 const tokenBaseURL = "https://api.openai.com/v1"
