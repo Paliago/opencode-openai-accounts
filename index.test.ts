@@ -36,7 +36,7 @@ function tokenCredential(accountID: string, access = `${accountID}-token`) {
 
 function environment() {
   const providerID = Provider.ID.make("openai")
-  const source: ProviderRecord = {
+  const source: ProviderRecord & { models: Map<string, Model.Info> } = {
     provider: { ...Provider.Info.empty(providerID), settings: { transport: "websocket" } },
     models: new Map(["gpt-6-astra", "gpt-5.4", "gpt-5.5-pro", "gpt-5.6"].map((id) => [id, {
       ...Model.Info.default(providerID, Model.ID.make(id)),
@@ -57,6 +57,7 @@ function environment() {
   let eventController: ReadableStreamDefaultController<Event> | undefined
   const events = new ReadableStream<Event>({ start(controller) { eventController = controller } })
   let transform: ((editor: ProviderEditor) => void) | undefined
+  let modelTransform: Parameters<Context["model"]["transform"]>[0] | undefined
   let notification = Promise.withResolvers<void>()
   const unexpected = () => { throw new Error("Unexpected registry operation") }
   const editor: ProviderEditor = {
@@ -71,7 +72,7 @@ function environment() {
     models: { set: unexpected, update: unexpected, remove: unexpected },
   }
   const context: Context = {
-    app: { name: "opencode", version: "2.0.7", channel: "release" },
+    app: { name: "opencode", version: "2.2.5", channel: "release" },
     integration: {
       get: async () => ({
         location: { directory: "/project" },
@@ -105,6 +106,12 @@ function environment() {
         notification.resolve()
       },
     },
+    model: {
+      transform: async (callback) => {
+        modelTransform = callback
+        return { dispose: async () => { modelTransform = undefined } }
+      },
+    },
     session: {
       hook: async (name, callback) => {
         hooks.set(name, callback)
@@ -131,7 +138,16 @@ function environment() {
     eventController.enqueue({ type: "credential.updated", id: "evt_changed", created: Date.now(), data: {} })
     await notification.promise
   }
-  return { context, providers, credentials, calls, selected, resolution, labels, changed, hooks, source }
+  function availableModels() {
+    const models = new Map([source, ...providers.values()].flatMap((entry) =>
+      [...entry.models.values()].map((item): [string, Model.Info] => [`${item.providerID}/${item.id}`, item])))
+    modelTransform?.({
+      list: (providerID) => [...models.values()].filter((item) => !providerID || item.providerID === providerID),
+      remove: (providerID, modelID) => { models.delete(`${providerID}/${modelID}`) },
+    })
+    return [...models.values()]
+  }
+  return { context, providers, credentials, calls, selected, resolution, labels, changed, hooks, source, availableModels }
 }
 
 function authorize(selected: ReturnType<typeof model>, url = "https://chatgpt.com/backend-api/codex/responses") {
@@ -155,12 +171,12 @@ test("saved ChatGPT accounts become separate providers with their model variants
   const source = structuredClone(state.source)
   t.after(await setup(state.context))
   assert.deepEqual([...state.providers.keys()], ["openai-cred_personal", "openai-cred_stampen"])
-  assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["OpenAI — personal", "OpenAI — stampen"])
+  assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["personal", "stampen"])
   for (const entry of state.providers.values()) {
     assert.deepEqual([...entry.models.keys()], ["gpt-6-astra"])
     const item = entry.models.get("gpt-6-astra")
     assert.ok(item)
-    assert.equal(item.name, `GPT-6 Astra — ${state.labels.get(entry.provider.id.slice(7))}`)
+    assert.equal(item.name, `${state.labels.get(entry.provider.id.slice(7))} - GPT-6 Astra`)
     assert.equal(item.id, "gpt-6-astra")
     assert.equal(item.modelID, "gpt-6-astra")
     assert.equal(item.providerID, entry.provider.id)
@@ -173,6 +189,39 @@ test("saved ChatGPT accounts become separate providers with their model variants
   })))
   assert.ok(!catalog.includes("personal-token"))
   assert.ok(!catalog.includes("stampen-token"))
+})
+
+test("generic OpenAI models are hidden only while named account models are available", async () => {
+  const state = environment()
+  const otherID = Provider.ID.make("other-provider")
+  state.providers.set(otherID, {
+    provider: Provider.Info.empty(otherID),
+    models: new Map([["other-model", Model.Info.default(otherID, Model.ID.make("other-model"))]]),
+  })
+  const source = structuredClone(state.source)
+  const cleanup = await setup(state.context)
+  try {
+    const visible = state.availableModels()
+    assert.equal(visible.some((item) => item.providerID === "openai"), false)
+    assert.equal(visible.some((item) => item.providerID === "openai-cred_personal"), true)
+    assert.equal(visible.some((item) => item.providerID === "openai-cred_stampen"), true)
+    assert.equal(visible.some((item) => item.providerID === otherID), true)
+    assert.deepEqual(state.source, source)
+
+    state.source.models.clear()
+    await state.changed()
+    for (const [id, item] of source.models) state.source.models.set(id, { ...item, enabled: false })
+    assert.equal(state.availableModels().some((item) => item.providerID === "openai"), true)
+
+    state.credentials.delete("cred_personal")
+    state.credentials.delete("cred_stampen")
+    for (const [id, item] of source.models) state.source.models.set(id, item)
+    await state.changed()
+    assert.deepEqual(state.availableModels(), [...source.models.values()])
+  } finally {
+    await cleanup()
+  }
+  assert.deepEqual(state.availableModels(), [...source.models.values()])
 })
 
 test("concurrent requests stay account-bound and reuse a pending credential resolution", async (t) => {
@@ -230,15 +279,15 @@ test("account additions, renames, and removals update the catalog without rebind
   state.labels.set("cred_personal", "Private")
   state.credentials.set("cred_additional", credential("additional"))
   await state.changed()
-  assert.equal(state.providers.get("openai-cred_personal")?.provider.name, "OpenAI — Private")
+  assert.equal(state.providers.get("openai-cred_personal")?.provider.name, "Private")
   assert.equal(state.providers.get("openai-cred_personal")?.provider.id, "openai-cred_personal")
   const renamed = state.providers.get("openai-cred_personal")?.models.get("gpt-6-astra")
   assert.ok(renamed)
-  assert.equal(renamed.name, "GPT-6 Astra — Private")
+  assert.equal(renamed.name, "Private - GPT-6 Astra")
   assert.equal(renamed.id, "gpt-6-astra")
   assert.equal(renamed.modelID, "gpt-6-astra")
   assert.equal(renamed.providerID, "openai-cred_personal")
-  assert.equal(state.providers.get("openai-cred_stampen")?.models.get("gpt-6-astra")?.name, "GPT-6 Astra — stampen")
+  assert.equal(state.providers.get("openai-cred_stampen")?.models.get("gpt-6-astra")?.name, "stampen - GPT-6 Astra")
   assert.deepEqual(state.source, source)
   assert.equal(state.providers.size, 3)
   assert.equal((await authorize(personal)).authorization, "Bearer personal-token")
@@ -298,7 +347,7 @@ test("token-sharing accounts become providers without an account ID", async (t) 
   state.credentials.set("cred_personal", tokenCredential("personal"))
   state.credentials.delete("cred_stampen")
   t.after(await setup(state.context))
-  assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["OpenAI — personal"])
+  assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["personal"])
   const entry = state.providers.get("openai-cred_personal")
   assert.ok(entry)
   assert.equal(entry.provider.settings?.baseURL, "https://api.openai.com/v1")
@@ -338,4 +387,38 @@ test("mixed codex and token-sharing accounts use their own endpoints", async (t)
   assert.equal((await authorize(codex)).authorization, "Bearer stampen-token")
   await assert.rejects(authorize(token), /different endpoint/)
   await assert.rejects(authorize(codex, "https://api.openai.com/v1/responses"), /different endpoint/)
+})
+
+test("OpenCode 2.2.5 model eligibility and context caps apply independently to each account", async (t) => {
+  const state = environment()
+  state.credentials.set("cred_personal", tokenCredential("personal"))
+  for (const id of ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra-fast", "gpt-6.1-pro", "gpt-image-2"]) {
+    state.source.models.set(id, {
+      ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make(id)),
+      name: id,
+      type: id === "gpt-image-2" ? "image" : "chat",
+      body: id === "gpt-6.1-pro" ? { reasoning: { mode: "pro" } } : {},
+      limit: { context: 1_000_000, output: 128_000 },
+    })
+  }
+  t.after(await setup(state.context))
+  const token = state.providers.get("openai-cred_personal")
+  const codex = state.providers.get("openai-cred_stampen")
+  assert.ok(token)
+  assert.ok(codex)
+  assert.equal(token.models.has("gpt-5.5"), true)
+  assert.equal(codex.models.has("gpt-5.5"), false)
+  assert.equal(codex.models.has("gpt-5.3-codex-spark"), false)
+  assert.equal(token.models.has("gpt-image-2"), false)
+  assert.equal(codex.models.has("gpt-image-2"), true)
+  for (const entry of [token, codex]) {
+    assert.equal(entry.models.has("gpt-6.1-pro"), false)
+    assert.equal(entry.models.has("gpt-6.1-terra"), true)
+    assert.equal(entry.models.has("gpt-6.1-terra-fast"), true)
+    assert.deepEqual(entry.models.get("gpt-6.1-sol")?.limit, { input: 500_000, context: 628_000, output: 128_000 })
+    assert.deepEqual(entry.models.get("gpt-6-astra")?.limit, state.source.models.get("gpt-6-astra")?.limit)
+  }
+  assert.deepEqual(token.models.get("gpt-5.5")?.limit, { input: 272_000, context: 400_000, output: 128_000 })
+  assert.equal(token.models.get("gpt-6.1-sol")?.settings?.compaction?.type, "summary")
+  assert.equal(token.models.get("gpt-6.1-sol")?.compatibility?.supportsEffortUpdates, false)
 })

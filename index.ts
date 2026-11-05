@@ -10,7 +10,7 @@ import { Headers } from "effect/http"
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
 const tokenBaseURL = "https://api.openai.com/v1"
 
-// Mirrors OpenCode 2.0.26's token-sharing allowlist (opencode.provider.chatgpt).
+// Mirrors OpenCode 2.2.5's token-sharing fallback inventory.
 const tokenSharingModels = new Set([
   "gpt-5.5",
   "gpt-5.5-fast",
@@ -28,6 +28,8 @@ const tokenSharingModels = new Set([
   "gpt-6-sol-fast",
   "gpt-6.1-sol",
   "gpt-6.1-sol-fast",
+  "gpt-6.1-terra",
+  "gpt-6.1-terra-fast",
 ])
 
 type Context = {
@@ -36,8 +38,16 @@ type Context = {
     connection: Pick<Plugin.Context["integration"]["connection"], "active" | "resolve">
   }
   provider: Pick<Plugin.Context["provider"], "transform" | "reload">
+  model: {
+    transform(callback: (editor: {
+      list(providerID?: string): readonly Model.Info[]
+      remove(providerID: string, modelID: string): void
+    }) => void): Promise<{ dispose(): Promise<void> }>
+  }
   session: { hook: ModelHooks<Pick<SessionHooks, "context" | "compaction" | "generate" | "title">> }
-  event: Plugin.Context["event"]
+  event: {
+    subscribe(options?: { signal?: AbortSignal }): ReturnType<Plugin.Context["event"]["subscribe"]>
+  }
 }
 
 type SavedConnection = Extract<Parameters<Plugin.Context["integration"]["connection"]["resolve"]>[0], { type: "credential" }>
@@ -78,17 +88,13 @@ function resolveCredential(context: Context, connection: SavedConnection) {
   return request
 }
 
-function isCodex(value: Credential.Value | undefined): boolean {
-  return value?.type === "oauth" &&
-    (value.methodID === "chatgpt-browser" || value.methodID === "chatgpt-headless")
-}
-
-function isTokenSharing(value: Credential.Value | Credential.OAuth | undefined): boolean {
+function isTokenSharing(value: Credential.Value | undefined): boolean {
   return value?.type === "oauth" && value.methodID === "chatgpt-token-sharing"
 }
 
 function isChatGPT(value: Credential.Value | undefined): value is Credential.OAuth {
-  return isCodex(value) || isTokenSharing(value)
+  return value?.type === "oauth" &&
+    ["chatgpt-browser", "chatgpt-headless", "chatgpt-token-sharing"].includes(value.methodID)
 }
 
 function authenticationError(message: string) {
@@ -110,13 +116,9 @@ export function model(modelID: string, settings: OpenAI.Settings) {
       return yield* Effect.fail(authenticationError("OpenAI account binding was removed. Select a connected account."))
     }
     const destination = new URL(input.url)
-    if (binding.kind === "token") {
-      if (destination.origin !== "https://api.openai.com" ||
-        !destination.pathname.startsWith("/v1/") || destination.username || destination.password) {
-        return yield* Effect.fail(authenticationError("Refusing to send a ChatGPT credential to a different endpoint."))
-      }
-    } else if (destination.origin !== "https://chatgpt.com" ||
-      !destination.pathname.startsWith("/backend-api/codex/") || destination.username || destination.password) {
+    const endpoint = new URL(binding.baseURL)
+    if (destination.origin !== endpoint.origin ||
+      !destination.pathname.startsWith(`${endpoint.pathname}/`) || destination.username || destination.password) {
       return yield* Effect.fail(authenticationError("Refusing to send a ChatGPT credential to a different endpoint."))
     }
 
@@ -136,7 +138,11 @@ export function model(modelID: string, settings: OpenAI.Settings) {
       return Headers.setAll(headers, {
         authorization: `Bearer ${credential.access}`,
         "user-agent": headers["user-agent"] ?? `opencode/${binding.version}`,
-        ...(headers["x-session-id"] ? { "session-id": headers["x-session-id"] } : {}),
+        ...(headers["x-session-id"] ? {
+          "session-id": headers["x-session-id"],
+          "thread-id": headers["x-session-id"],
+          "x-client-request-id": headers["x-session-id"],
+        } : {}),
       })
     }
     const accountID = credential.metadata?.accountID
@@ -170,12 +176,20 @@ function isTokenSharingModel(model: Model.Info) {
 function isChatGPTModel(model: Model.Info) {
   if (!model.enabled || isPro(model.body)) return false
   const id = model.modelID ?? model.id
-  if (id === "gpt-5.5" || id === "gpt-5.3-codex-spark") return true
-  if (id === "gpt-5.5-pro" || id === "gpt-5.6") return false
-  // ponytail: follows OpenCode 2.0.7's Codex eligibility policy; replace with account discovery when exposed.
+  if (model.type === "image") return id === "gpt-image-2"
+  if (id === "gpt-5.6") return false
   const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/)
   const major = Number(match?.[1])
-  return major > 5 || (major === 5 && Number(match?.[2] ?? 0) > 4)
+  return major > 5 || (major === 5 && Number(match?.[2] ?? 0) > 5)
+}
+
+function contextLimit(model: Model.Info) {
+  const match = (model.modelID ?? model.id).match(/^gpt-(\d+)(?:\.(\d+))?/)
+  const major = Number(match?.[1])
+  const input = !match || major > 6 || (major === 6 && Number(match[2] ?? 0) >= 1) ? 500_000 : 272_000
+  return (model.limit.input || model.limit.context) <= input
+    ? model.limit
+    : { ...model.limit, input, context: input + model.limit.output }
 }
 
 /** Register one provider per saved ChatGPT account and follow account changes. */
@@ -225,7 +239,7 @@ export async function setup(context: Context) {
       editor.add({
         info: {
           ...Provider.Info.empty(id),
-          name: `OpenAI — ${connection.label}`,
+          name: connection.label,
           canonical: Provider.ID.make("openai"),
           activation: "enabled",
           package: entrypoint.href,
@@ -233,23 +247,37 @@ export async function setup(context: Context) {
             ...source.provider.settings,
             transport: kind === "token" ? "http" : (source.provider.settings?.transport ?? "websocket"),
             baseURL,
+            encoding: source.provider.settings?.encoding ?? "zstd",
             ...(kind === "token" ? { compaction: { type: "summary" } } : {}),
             openAIAccountBinding: bindingID,
           },
         },
         models: [...source.models.values()].filter(filter).map((item) => ({
           ...item,
-          name: `${item.name} — ${connection.label}`,
+          name: `${connection.label} - ${item.name}`,
           providerID: id,
           canonical: Provider.ID.make("openai"),
           package: entrypoint.href,
-          settings: { ...item.settings, baseURL, openAIAccountBinding: bindingID },
+          settings: {
+            ...item.settings,
+            baseURL,
+            openAIAccountBinding: bindingID,
+            ...(kind === "token" ? { compaction: { type: "summary" } } : {}),
+          },
+          compatibility: { ...item.compatibility, ...(kind === "token" ? { supportsEffortUpdates: false } : {}) },
           cost: [],
-          limit: kind === "token" ? item.limit : { ...item.limit, context: 400_000, input: 272_000 },
+          limit: contextLimit(item),
           variants: item.variants?.filter((variant) => !isPro(variant.body)),
         })),
       })
     }
+  })
+
+  const modelRegistration = await context.model.transform((editor) => {
+    const hasAccountModels = editor.list().some((item) =>
+      item.enabled && item.providerID.startsWith("openai-") && accounts.has(item.providerID.slice("openai-".length)))
+    if (!hasAccountModels) return
+    for (const item of editor.list("openai")) editor.remove(item.providerID, item.id)
   })
 
   const omitOutputLimit = (event: SessionRequest) => {
@@ -277,6 +305,7 @@ export async function setup(context: Context) {
   return async () => {
     controller.abort()
     await watching
+    await modelRegistration.dispose()
     await registration.dispose()
     await Promise.all(hooks.map((hook) => hook.dispose()))
     for (const account of accounts.values()) runtime.bindings.delete(account.bindingID)
