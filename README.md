@@ -1,25 +1,23 @@
 # OpenCode OpenAI Accounts
 
-An OpenCode V2 plugin that lists saved ChatGPT accounts by their labels:
+Lists saved ChatGPT accounts as separate model providers, for example:
 
 ```text
 Elva - GPT-6.1 Sol
-Elva - GPT-6.1 Sol Fast
 Stampen - GPT-6.1 Sol
-Stampen - GPT-6.1 Sol Fast
 ```
 
-Choose the account and model together. Sessions can use different accounts concurrently without changing OpenCode's active account. The plugin adds no commands, tools, or UI extensions.
+Select an account and model together. Concurrent sessions use their selected accounts without changing OpenCode's globally active account.
 
 ## Install
 
-Targets OpenCode **2.2.5**. Save and name accounts through `/connect`, using **Sign in with ChatGPT** or a legacy Codex login. API-key and environment connections are excluded.
-
-Install the checkout's dependencies and add its directory to `~/.config/opencode/opencode.jsonc`:
+Requires OpenCode V2 with the public provider/model transforms and session HTTP hooks available in **2.2.6**. Save and name accounts through `/connect`, using **Sign in with ChatGPT** or a legacy Codex login. API-key and environment connections are excluded.
 
 ```sh
 npm ci
 ```
+
+Add the checkout directory to `~/.config/opencode/opencode.jsonc`, preserving other settings:
 
 ```jsonc
 {
@@ -28,23 +26,35 @@ npm ci
 }
 ```
 
-Preserve other plugin entries. Configure the directory, not `index.ts`, and do not also load an installed copy. OpenCode reloads configuration automatically; `/reload` forces a refresh. No `cli.json` entry is needed.
+Load the directory, not `index.ts`, and do not load a second installed copy. Configuration reloads automatically; `/reload` forces a refresh.
 
-## Behavior
+## Upgrade behavior
 
-- Model names are exactly `<account label> - <model name>`; provider headings use only the account label.
-- Provider IDs remain `openai-<credentialID>`, so renaming accounts preserves model selections. Reconnecting creates a new credential ID and requires selecting that account again.
-- Credentials stay in OpenCode. Each request resolves its bound credential, including OAuth refresh; concurrent resolutions for the same account are shared.
-- Missing or unusable credentials fail closed, without falling back to another account or an environment API key.
-- OpenCode's native OpenAI runtime handles requests. The small adapter supplies account-specific authentication and restricts credentials to their intended endpoint.
-- Current ChatGPT sign-ins use `https://api.openai.com/v1`, HTTP transport, summary compaction, and the OpenCode 2.2.5 token-sharing fallback inventory, including GPT-6.1 Terra.
-- Legacy Codex sign-ins use `https://chatgpt.com/backend-api/codex`, account headers, GPT models newer than 5.5 except `gpt-5.6`, and `gpt-image-2` when present in the source catalog.
-- Subscription entries have no token cost, exclude pro reasoning variants, and default to compressed requests. Input caps match OpenCode 2.2.5: 500,000 for GPT-6.1 and newer, 272,000 for older models, without increasing smaller catalog limits.
-- Account requests omit explicit output-token overrides for prompts, compaction, transient generation, and titles.
-- Account changes refresh the catalog. Generic OpenAI models are hidden while at least one named account has available models; the underlying integration and logins remain intact. If no account models remain, the generic models return.
-- Existing sessions selected on `openai/...` must switch to a named account entry. Hiding is a model-catalog transform, not a UI patch or a change to authentication.
+**Routine OpenCode upgrades do not require matching this plugin's AI-runtime dependencies to the host.** Provider definitions reference `@opencode/ai/providers/openai` by name. OpenCode loads its own bundled implementation, so protocol serialization, streaming, compression, and runtime fixes follow the installed OpenCode release.
 
-Models and reasoning variants come from OpenCode's OpenAI source catalog. Eligibility follows the targeted OpenCode release, not a per-account entitlement lookup. Review these policies when updating OpenCode dependencies.
+The plugin does not construct native models, replace runtime routes, patch global fetch, or import Effect or the AI runtime directly. Its only direct runtime dependency is the public `@opencode/plugin` SDK. That SDK remains pinned for reproducible installation; it does not need updating just to select the host's newer OpenAI implementation.
+
+This is not a promise of compatibility with every future release. A breaking public plugin API change or a change to ChatGPT subscription policy may still require maintenance. Model eligibility and subscription limits remain explicit plugin policy because OpenCode does not currently expose per-provider saved-connection binding with native account-aware policy.
+
+## Account behavior and security
+
+- Provider IDs remain `openai-<credentialID>`. Account renames preserve existing selections; reconnecting creates a new credential ID and requires selecting the new entry.
+- Credentials remain in OpenCode. The session HTTP hook resolves the bound saved connection at request time, including normal OAuth refresh. Concurrent resolutions for the same account are shared.
+- Missing, expired, removed, or changed authentication methods fail closed. Requests never select the globally active account as a fallback.
+- Credentials and inherited authentication headers are excluded from provider/model definitions. The hook validates the destination before supplying a token and removes conflicting authentication/account headers.
+- Token-sharing accounts use `https://api.openai.com/v1`. Legacy Codex accounts use `https://chatgpt.com/backend-api/codex` with account-specific headers.
+- All accounts use **HTTP**, compressed requests, and summary compaction. This avoids experimental WebSocket hooks and the native compaction endpoint's account-specific requirements.
+- Requests explicitly set `store: false` and omit output-token overrides for the agent loop, compaction, transient session generation, and titles.
+- Generic OpenAI models are hidden while at least one named account has available models. The integration and saved logins remain intact.
+- Model names, reasoning variants, and definitions come from OpenCode's catalog, filtered through subscription eligibility policy. Subscription pricing is zero; pro reasoning variants are excluded. Input caps are 500,000 for GPT-6.1 and newer and 272,000 for older models, without increasing smaller catalog limits.
+
+## Supported scope
+
+Named-account authentication covers **session-based chat requests**, including the agent loop, titles, compaction, and `session.generate`.
+
+Standalone `experimental.generate` calls do not run session hooks and are not supported through these named providers. Media models are intentionally excluded for the same reason; they must not appear usable while bypassing account authentication. Use the native OpenAI integration for those operations.
+
+If a saved legacy account returns an expired-token error despite normal credential resolution, reconnect it through `/connect`; the plugin does not implement a separate OAuth refresh flow.
 
 ## Development
 
@@ -53,6 +63,6 @@ npm run check
 npm test
 ```
 
-Existing tests cover labels and renames, concurrent account isolation, refreshed credentials, failure behavior, endpoint restrictions, output-limit omission, and cleanup without real credentials.
+The existing tests cover account isolation and refresh, failure behavior, endpoint restrictions, labels and renames, request bodies, all session request kinds, stateless settings, inherited-authentication removal, model visibility, subscription policy, and cleanup without real credentials.
 
-References: [plugin API](https://opencode.ai/v2/docs/build/plugins/server), [ChatGPT policy](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/plugin/provider/chatgpt.ts), [Codex policy](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/plugin/provider/openai.ts), [context caps](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/plugin/provider/openai-context-caps.ts).
+References: [public plugin API](https://opencode.ai/docs/build/plugins/server), [host provider loader](https://github.com/anomalyco/opencode/blob/v2.2.6/packages/core/src/provider.ts), [host model resolver](https://github.com/anomalyco/opencode/blob/v2.2.6/packages/core/src/model-resolver.ts).

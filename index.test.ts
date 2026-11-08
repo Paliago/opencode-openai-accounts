@@ -3,11 +3,9 @@ import { test } from "node:test"
 import { Credential, Integration, Model, Provider } from "@opencode/plugin"
 import { Agent } from "@opencode/schema/agent"
 import { Session } from "@opencode/schema/session"
-import type { SessionContext } from "@opencode/plugin/promise/session"
+import type { SessionContext, SessionHooks, SessionRequestKind } from "@opencode/plugin/promise/session"
 import type { ProviderEditor, ProviderRecord } from "@opencode/plugin/promise/provider"
-import { Effect } from "effect"
-import { Headers } from "effect/http"
-import { model, setup } from "./index.ts"
+import { setup } from "./index.ts"
 
 type Context = Parameters<typeof setup>[0]
 type Event = ReturnType<Context["event"]["subscribe"]> extends AsyncIterable<infer Item> ? Item : never
@@ -36,7 +34,7 @@ function tokenCredential(accountID: string, access = `${accountID}-token`) {
 
 function environment() {
   const providerID = Provider.ID.make("openai")
-  const source: ProviderRecord & { models: Map<string, Model.Info> } = {
+  const source: { provider: Provider.Info; models: Map<string, Model.Info> } = {
     provider: { ...Provider.Info.empty(providerID), settings: { transport: "websocket" } },
     models: new Map(["gpt-6-astra", "gpt-5.4", "gpt-5.5-pro", "gpt-5.6"].map((id) => [id, {
       ...Model.Info.default(providerID, Model.ID.make(id)),
@@ -51,7 +49,7 @@ function environment() {
     ["cred_key", Credential.Key.make({ type: "key", key: "api-key" })],
   ])
   const calls: string[] = []
-  const hooks = new Map<string, (event: SessionContext) => Promise<void> | void>()
+  const hooks: { [Name in keyof SessionHooks]?: (event: SessionHooks[Name]) => Promise<void> | void } = {}
   const resolution: { error?: Error } = {}
   const labels = new Map([...credentials.keys()].map((id) => [id, id.slice(5)]))
   let eventController: ReadableStreamDefaultController<Event> | undefined
@@ -72,7 +70,6 @@ function environment() {
     models: { set: unexpected, update: unexpected, remove: unexpected },
   }
   const context: Context = {
-    app: { name: "opencode", version: "2.2.5", channel: "release" },
     integration: {
       get: async () => ({
         location: { directory: "/project" },
@@ -84,7 +81,6 @@ function environment() {
         },
       }),
       connection: {
-        active: async () => { throw new Error("Account-bound requests must not select the active account") },
         resolve: async (connection) => {
           if (resolution.error) throw resolution.error
           assert.equal(connection.type, "credential")
@@ -114,8 +110,8 @@ function environment() {
     },
     session: {
       hook: async (name, callback) => {
-        hooks.set(name, callback)
-        return { dispose: async () => { hooks.delete(name) } }
+        Object.defineProperty(hooks, name, { value: callback, configurable: true, enumerable: true })
+        return { dispose: async () => { delete hooks[name] } }
       },
     },
     event: {
@@ -130,7 +126,33 @@ function environment() {
     assert.ok(entry)
     const selected = entry.models.get("gpt-6-astra")
     assert.ok(selected)
-    return model(selected.id, { ...entry.provider.settings, ...selected.settings })
+    const hook = hooks["http.request"]
+    assert.ok(hook)
+    return {
+      authorize: async (url: string, kind: SessionRequestKind = "primary") => {
+        const event = {
+          sessionID: Session.ID.make("session-123"),
+          agent: Agent.ID.make("build"),
+          model: { providerID: entry.provider.id, id: selected.id },
+          kind,
+          request: new Request(url, {
+            method: "POST",
+            body: "{}",
+            headers: {
+              Authorization: "Bearer wrong-account",
+              "ChatGPT-Account-ID": "wrong-account",
+              "OpenAI-Organization": "wrong-organization",
+              "OpenAI-Project": "wrong-project",
+              "X-Session-Id": "session-123",
+            },
+          }),
+        } satisfies SessionHooks["http.request"]
+        await hook(event)
+        assert.equal(event.request.bodyUsed, false)
+        assert.equal(await event.request.clone().text(), "{}")
+        return Object.fromEntries(event.request.headers)
+      },
+    }
   }
   async function changed() {
     notification = Promise.withResolvers<void>()
@@ -150,20 +172,8 @@ function environment() {
   return { context, providers, credentials, calls, selected, resolution, labels, changed, hooks, source, availableModels }
 }
 
-function authorize(selected: ReturnType<typeof model>, url = "https://chatgpt.com/backend-api/codex/responses") {
-  return Effect.runPromise(selected.route.auth.apply({
-    request: {},
-    method: "POST",
-    url,
-    body: "{}",
-    headers: Headers.fromInput({
-      Authorization: "Bearer wrong-account",
-      "ChatGPT-Account-ID": "wrong-account",
-      "OpenAI-Organization": "wrong-organization",
-      "OpenAI-Project": "wrong-project",
-      "X-Session-Id": "session-123",
-    }),
-  }))
+function authorize(selected: ReturnType<ReturnType<typeof environment>["selected"]>, url = "https://chatgpt.com/backend-api/codex/responses") {
+  return selected.authorize(url)
 }
 
 test("saved ChatGPT accounts become separate providers with their model variants", async (t) => {
@@ -319,8 +329,9 @@ test("all account request kinds omit output limits without changing other provid
   const state = environment()
   const cleanup = await setup(state.context)
   try {
-    assert.deepEqual([...state.hooks.keys()], ["context", "compaction", "generate", "title"])
-    for (const hook of state.hooks.values()) {
+    for (const name of ["context", "compaction", "generate", "title"] satisfies Array<keyof SessionHooks>) {
+      const hook = state.hooks[name]
+      assert.ok(hook)
       for (const providerID of ["openai-cred_personal", "openai-cred_stampen", "openai", "anthropic"]) {
         const event: SessionContext = {
           sessionID: Session.ID.make("session_output_limit"),
@@ -334,12 +345,13 @@ test("all account request kinds omit output limits without changing other provid
         await hook(event)
         assert.equal(event.options.maxTokens, providerID.startsWith("openai-cred_") ? undefined : 8192)
         assert.equal(event.options.reasoningEffort, "high")
+        assert.equal(event.options.store, providerID.startsWith("openai-cred_") ? false : undefined)
       }
     }
   } finally {
     await cleanup()
   }
-  assert.equal(state.hooks.size, 0)
+  assert.equal(Object.keys(state.hooks).length, 0)
 })
 
 test("token-sharing accounts become providers without an account ID", async (t) => {
@@ -356,7 +368,7 @@ test("token-sharing accounts become providers without an account ID", async (t) 
 
   const selected = entry.models.get("gpt-6-astra")
   assert.ok(selected)
-  const token = model(selected.id, { ...entry.provider.settings, ...selected.settings })
+  const token = state.selected("personal")
   const headers = await authorize(token, "https://api.openai.com/v1/responses")
   assert.equal(headers.authorization, "Bearer personal-token")
   assert.equal(headers["chatgpt-account-id"], undefined)
@@ -381,15 +393,15 @@ test("mixed codex and token-sharing accounts use their own endpoints", async (t)
   const codexModel = codexEntry.models.get("gpt-6-astra")
   assert.ok(tokenModel)
   assert.ok(codexModel)
-  const token = model(tokenModel.id, { ...tokenEntry.provider.settings, ...tokenModel.settings })
-  const codex = model(codexModel.id, { ...codexEntry.provider.settings, ...codexModel.settings })
+  const token = state.selected("personal")
+  const codex = state.selected("stampen")
   assert.equal((await authorize(token, "https://api.openai.com/v1/responses")).authorization, "Bearer personal-token")
   assert.equal((await authorize(codex)).authorization, "Bearer stampen-token")
   await assert.rejects(authorize(token), /different endpoint/)
   await assert.rejects(authorize(codex, "https://api.openai.com/v1/responses"), /different endpoint/)
 })
 
-test("OpenCode 2.2.5 model eligibility and context caps apply independently to each account", async (t) => {
+test("subscription model eligibility and context caps apply independently to each account", async (t) => {
   const state = environment()
   state.credentials.set("cred_personal", tokenCredential("personal"))
   for (const id of ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra-fast", "gpt-6.1-pro", "gpt-image-2"]) {
@@ -410,7 +422,7 @@ test("OpenCode 2.2.5 model eligibility and context caps apply independently to e
   assert.equal(codex.models.has("gpt-5.5"), false)
   assert.equal(codex.models.has("gpt-5.3-codex-spark"), false)
   assert.equal(token.models.has("gpt-image-2"), false)
-  assert.equal(codex.models.has("gpt-image-2"), true)
+  assert.equal(codex.models.has("gpt-image-2"), false)
   for (const entry of [token, codex]) {
     assert.equal(entry.models.has("gpt-6.1-pro"), false)
     assert.equal(entry.models.has("gpt-6.1-terra"), true)
@@ -421,4 +433,79 @@ test("OpenCode 2.2.5 model eligibility and context caps apply independently to e
   assert.deepEqual(token.models.get("gpt-5.5")?.limit, { input: 272_000, context: 400_000, output: 128_000 })
   assert.equal(token.models.get("gpt-6.1-sol")?.settings?.compaction?.type, "summary")
   assert.equal(token.models.get("gpt-6.1-sol")?.compatibility?.supportsEffortUpdates, false)
+})
+
+test("account request flows refresh authentication without consuming request bodies", async (t) => {
+  const state = environment()
+  t.after(await setup(state.context))
+  const selected = state.selected("personal")
+  for (const kind of ["primary", "compaction", "title", "generate"] satisfies SessionRequestKind[]) {
+    state.credentials.set("cred_personal", credential("personal", `${kind}-token`))
+    const headers = await selected.authorize("https://chatgpt.com/backend-api/codex/responses", kind)
+    assert.equal(headers.authorization, `Bearer ${kind}-token`)
+  }
+})
+
+test("account definitions exclude inherited authentication and enforce stateless requests", async (t) => {
+  const state = environment()
+  state.source.provider = {
+    ...state.source.provider,
+    integrationID: Integration.ID.make("openai"),
+    settings: { apiKey: "source-secret", baseURL: "https://example.com", transport: "websocket" },
+    headers: { authorization: "Bearer source-secret" },
+  }
+  const original = state.source.models.get("gpt-6-astra")
+  assert.ok(original)
+  state.source.models.set(original.id, {
+    ...original,
+    settings: { apiKey: "model-secret", store: true, baseURL: "https://example.com" },
+    headers: { authorization: "Bearer model-secret" },
+    body: { store: true },
+    variants: [{
+      id: Model.VariantID.make("high"),
+      settings: { apiKey: "variant-secret", store: true, reasoningEffort: "high" },
+      headers: { authorization: "Bearer variant-secret" },
+      body: { store: true },
+    }],
+  })
+  t.after(await setup(state.context))
+  for (const entry of state.providers.values()) {
+    assert.equal(entry.provider.integrationID, undefined)
+    assert.equal(entry.provider.package, "@opencode/ai/providers/openai")
+    assert.equal(entry.provider.settings?.transport, "http")
+    assert.equal(entry.provider.settings?.store, false)
+    const item = entry.models.get(original.id)
+    assert.ok(item)
+    assert.equal(item.package, "@opencode/ai/providers/openai")
+    assert.equal(item.settings?.store, false)
+    assert.equal(item.body?.store, false)
+    assert.equal(item.variants?.[0]?.settings?.store, false)
+    assert.equal(item.variants?.[0]?.body?.store, false)
+    assert.equal(item.variants?.[0]?.settings?.reasoningEffort, "high")
+    assert.equal(JSON.stringify({ provider: entry.provider, item }).includes("secret"), false)
+  }
+})
+
+test("HTTP authentication leaves unrelated providers untouched", async (t) => {
+  const state = environment()
+  t.after(await setup(state.context))
+  const hook = state.hooks["http.request"]
+  assert.ok(hook)
+  const request = new Request("https://example.com", { headers: { authorization: "Bearer unrelated" } })
+  await hook({
+    sessionID: Session.ID.make("session_unrelated"),
+    agent: Agent.ID.make("build"),
+    model: { providerID: Provider.ID.make("openai-compatible"), id: Model.ID.make("other") },
+    kind: "primary",
+    request,
+  })
+  assert.equal(request.headers.get("authorization"), "Bearer unrelated")
+})
+
+test("accounts cannot change authentication methods behind an existing request binding", async (t) => {
+  const state = environment()
+  t.after(await setup(state.context))
+  const personal = state.selected("personal")
+  state.credentials.set("cred_personal", tokenCredential("personal"))
+  await assert.rejects(authorize(personal), /selected ChatGPT account is unavailable/)
 })

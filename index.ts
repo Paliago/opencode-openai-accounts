@@ -1,41 +1,21 @@
-import { AIError, AuthenticationError, LanguageModel } from "@opencode/ai"
-import * as OpenAI from "@opencode/ai/providers/openai"
-import { Auth } from "@opencode/ai/route"
-import { Credential, Model, Plugin, Provider } from "@opencode/plugin"
+import { Model, Plugin, Provider } from "@opencode/plugin"
+import type { Credential } from "@opencode/plugin"
 import type { ModelHooks } from "@opencode/plugin/promise/registration"
 import type { SessionHooks, SessionRequest } from "@opencode/plugin/promise/session"
-import { Effect } from "effect"
-import { Headers } from "effect/http"
 
+const nativePackage = "@opencode/ai/providers/openai"
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
 const tokenBaseURL = "https://api.openai.com/v1"
-
-// Mirrors OpenCode 2.2.5's token-sharing fallback inventory.
 const tokenSharingModels = new Set([
-  "gpt-5.5",
-  "gpt-5.5-fast",
-  "gpt-5.6-luna",
-  "gpt-5.6-luna-fast",
-  "gpt-5.6-sol",
-  "gpt-5.6-sol-fast",
-  "gpt-5.6-terra",
-  "gpt-5.6-terra-fast",
-  "gpt-6-astra",
-  "gpt-6-astra-fast",
-  "gpt-6-luna",
-  "gpt-6-luna-fast",
-  "gpt-6-sol",
-  "gpt-6-sol-fast",
-  "gpt-6.1-sol",
-  "gpt-6.1-sol-fast",
-  "gpt-6.1-terra",
-  "gpt-6.1-terra-fast",
+  "gpt-5.5", "gpt-5.5-fast",
+  "gpt-5.6-luna", "gpt-5.6-luna-fast", "gpt-5.6-sol", "gpt-5.6-sol-fast", "gpt-5.6-terra", "gpt-5.6-terra-fast",
+  "gpt-6-astra", "gpt-6-astra-fast", "gpt-6-luna", "gpt-6-luna-fast", "gpt-6-sol", "gpt-6-sol-fast",
+  "gpt-6.1-sol", "gpt-6.1-sol-fast", "gpt-6.1-terra", "gpt-6.1-terra-fast",
 ])
 
 type Context = {
-  app: Plugin.Context["app"]
   integration: Pick<Plugin.Context["integration"], "get"> & {
-    connection: Pick<Plugin.Context["integration"]["connection"], "active" | "resolve">
+    connection: Pick<Plugin.Context["integration"]["connection"], "resolve">
   }
   provider: Pick<Plugin.Context["provider"], "transform" | "reload">
   model: {
@@ -44,122 +24,20 @@ type Context = {
       remove(providerID: string, modelID: string): void
     }) => void): Promise<{ dispose(): Promise<void> }>
   }
-  session: { hook: ModelHooks<Pick<SessionHooks, "context" | "compaction" | "generate" | "title">> }
+  session: { hook: ModelHooks<Pick<SessionHooks, "context" | "compaction" | "generate" | "title" | "http.request">> }
   event: {
     subscribe(options?: { signal?: AbortSignal }): ReturnType<Plugin.Context["event"]["subscribe"]>
   }
 }
 
 type SavedConnection = Extract<Parameters<Plugin.Context["integration"]["connection"]["resolve"]>[0], { type: "credential" }>
+type Account = { connection: SavedConnection; kind: "token" | "codex"; baseURL: string }
 
-type Binding = {
-  resolve: () => Promise<Credential.Value | undefined>
-  version: string
-  kind: "codex" | "token"
-  baseURL: string
-}
-
-type Runtime = {
-  bindings: Map<string, Binding>
-  pending: WeakMap<Context["app"], Map<string, Promise<Credential.Value | undefined>>>
-}
-
-declare global {
-  var openCodeOpenAIAccountRuntime: Runtime | undefined
-}
-
-// OpenCode caches native provider modules separately from hot-reloaded plugin modules.
-const runtime: Runtime = globalThis.openCodeOpenAIAccountRuntime ??= {
-  bindings: new Map(),
-  pending: new WeakMap(),
-}
-
-function resolveCredential(context: Context, connection: SavedConnection) {
-  let pending = runtime.pending.get(context.app)
-  if (!pending) {
-    pending = new Map()
-    runtime.pending.set(context.app, pending)
-  }
-  const current = pending.get(connection.id)
-  if (current) return current
-  const requests = pending
-  const request = context.integration.connection.resolve(connection).finally(() => requests.delete(connection.id))
-  requests.set(connection.id, request)
-  return request
-}
-
-function isTokenSharing(value: Credential.Value | undefined): boolean {
-  return value?.type === "oauth" && value.methodID === "chatgpt-token-sharing"
-}
-
-function isChatGPT(value: Credential.Value | undefined): value is Credential.OAuth {
-  return value?.type === "oauth" &&
-    ["chatgpt-browser", "chatgpt-headless", "chatgpt-token-sharing"].includes(value.methodID)
-}
-
-function authenticationError(message: string) {
-  return new AIError({ reason: new AuthenticationError({ message }) })
-}
-
-/** OpenCode native provider entrypoint. Credentials are resolved at request time. */
-export function model(modelID: string, settings: OpenAI.Settings) {
-  const { openAIAccountBinding, ...options } = settings
-  const initial = typeof openAIAccountBinding === "string" ? runtime.bindings.get(openAIAccountBinding) : undefined
-  if (!initial) {
-    throw new Error("OpenAI account binding is unavailable. Reload the plugin and select the account again.")
-  }
-
-  const native = OpenAI.model(modelID, { ...options, baseURL: initial.baseURL })
-  const auth = Auth.custom((input) => Effect.gen(function* () {
-    const binding = typeof openAIAccountBinding === "string" ? runtime.bindings.get(openAIAccountBinding) : undefined
-    if (!binding) {
-      return yield* Effect.fail(authenticationError("OpenAI account binding was removed. Select a connected account."))
-    }
-    const destination = new URL(input.url)
-    const endpoint = new URL(binding.baseURL)
-    if (destination.origin !== endpoint.origin ||
-      !destination.pathname.startsWith(`${endpoint.pathname}/`) || destination.username || destination.password) {
-      return yield* Effect.fail(authenticationError("Refusing to send a ChatGPT credential to a different endpoint."))
-    }
-
-    const credential = yield* Effect.tryPromise({
-      try: () => binding.resolve(),
-      catch: () => authenticationError("Could not refresh the selected OpenAI account. Reconnect it through /connect."),
-    })
-    if (!isChatGPT(credential) || !credential.access || credential.expires <= Date.now()) {
-      return yield* Effect.fail(authenticationError("The selected ChatGPT account is unavailable. Reconnect it through /connect."))
-    }
-
-    let headers = input.headers
-    for (const name of ["authorization", "api-key", "x-api-key", "cookie", "openai-organization", "openai-project", "chatgpt-account-id"]) {
-      headers = Headers.remove(headers, name)
-    }
-    if (isTokenSharing(credential)) {
-      return Headers.setAll(headers, {
-        authorization: `Bearer ${credential.access}`,
-        "user-agent": headers["user-agent"] ?? `opencode/${binding.version}`,
-        ...(headers["x-session-id"] ? {
-          "session-id": headers["x-session-id"],
-          "thread-id": headers["x-session-id"],
-          "x-client-request-id": headers["x-session-id"],
-        } : {}),
-      })
-    }
-    const accountID = credential.metadata?.accountID
-    if (typeof accountID !== "string" || !accountID) {
-      return yield* Effect.fail(authenticationError("The selected ChatGPT credential has no account ID. Reconnect it through /connect."))
-    }
-
-    return Headers.setAll(headers, {
-      authorization: `Bearer ${credential.access}`,
-      "chatgpt-account-id": accountID,
-      originator: "opencode",
-      "x-codex-beta-features": "remote_compaction_v2",
-      "user-agent": headers["user-agent"] ?? `opencode/${binding.version}`,
-      ...(headers["x-session-id"] ? { "session-id": headers["x-session-id"] } : {}),
-    })
-  }))
-  return LanguageModel.update(native, { route: native.route.with({ auth }) })
+function accountKind(value: Credential.Value | undefined) {
+  if (value?.type !== "oauth") return undefined
+  if (value.methodID === "chatgpt-token-sharing") return "token"
+  if (value.methodID === "chatgpt-browser" || value.methodID === "chatgpt-headless") return "codex"
+  return undefined
 }
 
 function isPro(body: Readonly<Record<string, unknown>> | undefined) {
@@ -167,16 +45,11 @@ function isPro(body: Readonly<Record<string, unknown>> | undefined) {
   return typeof reasoning === "object" && reasoning !== null && "mode" in reasoning && reasoning.mode === "pro"
 }
 
-function isTokenSharingModel(model: Model.Info) {
-  if (!model.enabled || isPro(model.body)) return false
+function eligible(model: Model.Info, kind: Account["kind"]) {
+  // Media generation does not run session HTTP hooks and cannot safely use this account binding.
+  if (!model.enabled || (model.type !== undefined && model.type !== "chat") || isPro(model.body)) return false
   const id = model.modelID ?? model.id
-  return tokenSharingModels.has(id)
-}
-
-function isChatGPTModel(model: Model.Info) {
-  if (!model.enabled || isPro(model.body)) return false
-  const id = model.modelID ?? model.id
-  if (model.type === "image") return id === "gpt-image-2"
+  if (kind === "token") return tokenSharingModels.has(id)
   if (id === "gpt-5.6") return false
   const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/)
   const major = Number(match?.[1])
@@ -192,104 +65,153 @@ function contextLimit(model: Model.Info) {
     : { ...model.limit, input, context: input + model.limit.output }
 }
 
-/** Register one provider per saved ChatGPT account and follow account changes. */
+function modelSettings(settings: Model.Info["settings"]): Model.Info["settings"] {
+  const {
+    apiKey, accessToken, authToken, auth, headers, body, baseURL, queryParams,
+    openAIAccountBinding, ...options
+  } = settings ?? {}
+  return { ...options, store: false, compaction: { type: "summary" } }
+}
+
+/** Register named accounts while leaving model construction and execution to OpenCode. */
 export async function setup(context: Context) {
-  let accounts = new Map<string, { connection: SavedConnection; bindingID: string; kind: Binding["kind"]; baseURL: string }>()
+  let accounts = new Map<string, Account>()
+  const managedProviders = new Set<string>()
+  const pending = new Map<string, Promise<Credential.Value | undefined>>()
   const controller = new AbortController()
-  const entrypoint = new URL(import.meta.url)
-  entrypoint.searchParams.set("account-runtime", crypto.randomUUID())
+  let disposed = false
+
+  function resolve(connection: SavedConnection) {
+    const current = pending.get(connection.id)
+    if (current) return current
+    const request = context.integration.connection.resolve(connection).finally(() => pending.delete(connection.id))
+    pending.set(connection.id, request)
+    return request
+  }
 
   async function synchronize() {
     const { data } = await context.integration.get({ integrationID: "openai" })
-    const next = new Map<string, { connection: SavedConnection; bindingID: string; kind: Binding["kind"]; baseURL: string }>()
+    const next = new Map<string, Account>()
     for (const connection of data.connections) {
       if (connection.type !== "credential") continue
-      let credential: Credential.Value | undefined
+      let value: Credential.Value | undefined
       try {
-        credential = await resolveCredential(context, connection)
+        value = await resolve(connection)
       } catch {
-        console.warn(`OpenAI account ${connection.label} could not be resolved; reconnect it through /connect.`)
+        const previous = accounts.get(`openai-${connection.id}`)
+        if (previous) next.set(`openai-${connection.id}`, { ...previous, connection })
         continue
       }
-      if (!isChatGPT(credential)) continue
-      const kind: Binding["kind"] = isTokenSharing(credential) ? "token" : "codex"
-      const baseURL = kind === "token" ? tokenBaseURL : codexBaseURL
-      const bindingID = accounts.get(connection.id)?.bindingID ?? crypto.randomUUID()
-      runtime.bindings.set(bindingID, {
-        resolve: () => resolveCredential(context, connection),
-        version: context.app.version,
-        kind,
-        baseURL,
-      })
-      next.set(connection.id, { connection, bindingID, kind, baseURL })
-    }
-    for (const [id, account] of accounts) {
-      if (!next.has(id)) runtime.bindings.delete(account.bindingID)
+      const kind = accountKind(value)
+      if (kind) next.set(`openai-${connection.id}`, { connection, kind, baseURL: kind === "token" ? tokenBaseURL : codexBaseURL })
     }
     accounts = next
+    for (const id of next.keys()) managedProviders.add(id)
   }
 
   await synchronize()
   const registration = await context.provider.transform((editor) => {
     const source = editor.get("openai")
     if (!source) return
-    for (const { connection, bindingID, kind, baseURL } of accounts.values()) {
-      const id = Provider.ID.make(`openai-${connection.id}`)
-      const filter = kind === "token" ? isTokenSharingModel : isChatGPTModel
+    for (const [providerID, account] of accounts) {
+      const id = Provider.ID.make(providerID)
       editor.add({
         info: {
           ...Provider.Info.empty(id),
-          name: connection.label,
+          name: account.connection.label,
           canonical: Provider.ID.make("openai"),
           activation: "enabled",
-          package: entrypoint.href,
+          package: nativePackage,
           settings: {
-            ...source.provider.settings,
-            transport: kind === "token" ? "http" : (source.provider.settings?.transport ?? "websocket"),
-            baseURL,
-            encoding: source.provider.settings?.encoding ?? "zstd",
-            ...(kind === "token" ? { compaction: { type: "summary" } } : {}),
-            openAIAccountBinding: bindingID,
+            transport: "http",
+            baseURL: account.baseURL,
+            encoding: "zstd",
+            compaction: { type: "summary" },
+            store: false,
           },
         },
-        models: [...source.models.values()].filter(filter).map((item) => ({
+        models: [...source.models.values()].filter((item) => eligible(item, account.kind)).map((item) => ({
           ...item,
-          name: `${connection.label} - ${item.name}`,
+          name: `${account.connection.label} - ${item.name}`,
           providerID: id,
           canonical: Provider.ID.make("openai"),
-          package: entrypoint.href,
-          settings: {
-            ...item.settings,
-            baseURL,
-            openAIAccountBinding: bindingID,
-            ...(kind === "token" ? { compaction: { type: "summary" } } : {}),
-          },
-          compatibility: { ...item.compatibility, ...(kind === "token" ? { supportsEffortUpdates: false } : {}) },
+          package: nativePackage,
+          settings: modelSettings(item.settings),
+          headers: undefined,
+          body: { ...item.body, store: false },
+          compatibility: { ...item.compatibility, ...(account.kind === "token" ? { supportsEffortUpdates: false } : {}) },
           cost: [],
           limit: contextLimit(item),
-          variants: item.variants?.filter((variant) => !isPro(variant.body)),
+          variants: item.variants?.filter((variant) => !isPro(variant.body)).map((variant) => ({
+            ...variant,
+            settings: modelSettings(variant.settings),
+            headers: undefined,
+            body: { ...variant.body, store: false },
+          })),
         })),
       })
     }
   })
 
   const modelRegistration = await context.model.transform((editor) => {
-    const hasAccountModels = editor.list().some((item) =>
-      item.enabled && item.providerID.startsWith("openai-") && accounts.has(item.providerID.slice("openai-".length)))
-    if (!hasAccountModels) return
+    if (!editor.list().some((item) => item.enabled && accounts.has(item.providerID))) return
     for (const item of editor.list("openai")) editor.remove(item.providerID, item.id)
   })
 
-  const omitOutputLimit = (event: SessionRequest) => {
-    if (event.model.providerID.startsWith("openai-") && accounts.has(event.model.providerID.slice(7))) {
-      delete event.options.maxTokens
+  const requestRegistration = await context.session.hook("http.request", async (event) => {
+    const account = accounts.get(event.model.providerID)
+    if (!account) {
+      if (managedProviders.has(event.model.providerID)) throw new Error("OpenAI account binding was removed. Select a connected account.")
+      return
     }
+    if (disposed) throw new Error("OpenAI account binding was removed. Reload the plugin.")
+    const destination = new URL(event.request.url)
+    const endpoint = new URL(account.baseURL)
+    if (destination.origin !== endpoint.origin || !destination.pathname.startsWith(`${endpoint.pathname}/`) ||
+      destination.username || destination.password) {
+      throw new Error("Refusing to send a ChatGPT credential to a different endpoint.")
+    }
+    let value: Credential.Value | undefined
+    try {
+      value = await resolve(account.connection)
+    } catch {
+      throw new Error("Could not refresh the selected OpenAI account. Reconnect it through /connect.")
+    }
+    const current = accounts.get(event.model.providerID)
+    if (disposed || !current || current.kind !== account.kind || current.baseURL !== account.baseURL) {
+      throw new Error("OpenAI account binding was removed. Retry the request.")
+    }
+    if (value?.type !== "oauth" || accountKind(value) !== account.kind || !value.access || value.expires <= Date.now()) {
+      throw new Error("The selected ChatGPT account is unavailable. Reconnect it through /connect.")
+    }
+    const headers = event.request.headers
+    for (const name of ["authorization", "api-key", "x-api-key", "cookie", "openai-organization", "openai-project", "chatgpt-account-id", "originator", "x-codex-beta-features"]) {
+      headers.delete(name)
+    }
+    const accountID = value.metadata?.accountID
+    if (account.kind === "codex") {
+      if (typeof accountID !== "string" || !accountID) throw new Error("The selected ChatGPT credential has no account ID. Reconnect it through /connect.")
+      headers.set("chatgpt-account-id", accountID)
+      headers.set("originator", "opencode")
+      headers.set("x-codex-beta-features", "remote_compaction_v2")
+    } else {
+      headers.set("thread-id", event.sessionID)
+      headers.set("x-client-request-id", event.sessionID)
+    }
+    headers.set("authorization", `Bearer ${value.access}`)
+    headers.set("session-id", headers.get("x-session-affinity") ?? headers.get("x-session-id") ?? event.sessionID)
+  })
+
+  const configureRequest = (event: SessionRequest) => {
+    if (!accounts.has(event.model.providerID)) return
+    delete event.options.maxTokens
+    event.options.store = false
   }
   const hooks = await Promise.all([
-    context.session.hook("context", omitOutputLimit),
-    context.session.hook("compaction", omitOutputLimit),
-    context.session.hook("generate", omitOutputLimit),
-    context.session.hook("title", omitOutputLimit),
+    context.session.hook("context", configureRequest),
+    context.session.hook("compaction", configureRequest),
+    context.session.hook("generate", configureRequest),
+    context.session.hook("title", configureRequest),
   ])
 
   const watching = (async () => {
@@ -303,12 +225,14 @@ export async function setup(context: Context) {
   })
 
   return async () => {
+    disposed = true
     controller.abort()
     await watching
+    accounts.clear()
+    await requestRegistration.dispose()
     await modelRegistration.dispose()
     await registration.dispose()
     await Promise.all(hooks.map((hook) => hook.dispose()))
-    for (const account of accounts.values()) runtime.bindings.delete(account.bindingID)
   }
 }
 
