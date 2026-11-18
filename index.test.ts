@@ -183,7 +183,7 @@ test("saved ChatGPT accounts become separate providers with their model variants
   assert.deepEqual([...state.providers.keys()], ["openai-cred_personal", "openai-cred_stampen"])
   assert.deepEqual([...state.providers.values()].map((entry) => entry.provider.name), ["personal", "stampen"])
   for (const entry of state.providers.values()) {
-    assert.deepEqual([...entry.models.keys()], ["gpt-6-astra"])
+    assert.deepEqual([...entry.models.keys()], ["gpt-6-astra", "gpt-5.4"])
     const item = entry.models.get("gpt-6-astra")
     assert.ok(item)
     assert.equal(item.name, `${state.labels.get(entry.provider.id.slice(7))} - GPT-6 Astra`)
@@ -364,7 +364,7 @@ test("token-sharing accounts become providers without an account ID", async (t) 
   assert.ok(entry)
   assert.equal(entry.provider.settings?.baseURL, "https://api.openai.com/v1")
   assert.equal(entry.provider.settings?.transport, "http")
-  assert.deepEqual([...entry.models.keys()], ["gpt-6-astra"])
+  assert.deepEqual([...entry.models.keys()], ["gpt-6-astra", "gpt-5.4"])
 
   const selected = entry.models.get("gpt-6-astra")
   assert.ok(selected)
@@ -404,7 +404,7 @@ test("mixed codex and token-sharing accounts use their own endpoints", async (t)
 test("subscription model eligibility and context caps apply independently to each account", async (t) => {
   const state = environment()
   state.credentials.set("cred_personal", tokenCredential("personal"))
-  for (const id of ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra-fast", "gpt-6.2-sol", "gpt-6.2-sol-fast", "gpt-6.2-astra", "gpt-6.2-astra-fast", "gpt-7-sol", "gpt-6.1-pro", "gpt-image-2"]) {
+  for (const id of ["gpt-5.5", "gpt-5.3-codex-spark", "o3", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra-fast", "gpt-6.2-sol", "gpt-6.2-sol-fast", "gpt-6.2-astra", "gpt-6.2-astra-fast", "gpt-7-sol", "gpt-6.1-pro", "gpt-image-2"]) {
     state.source.models.set(id, {
       ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make(id)),
       name: id,
@@ -419,12 +419,12 @@ test("subscription model eligibility and context caps apply independently to eac
   assert.ok(token)
   assert.ok(codex)
   assert.equal(token.models.has("gpt-5.5"), true)
-  assert.equal(codex.models.has("gpt-5.5"), false)
-  assert.equal(codex.models.has("gpt-5.3-codex-spark"), false)
-  assert.equal(token.models.has("gpt-5.3-codex-spark"), false)
   assert.equal(token.models.has("gpt-image-2"), false)
   assert.equal(codex.models.has("gpt-image-2"), false)
   for (const entry of [token, codex]) {
+    for (const id of ["gpt-5.4", "gpt-5.5", "gpt-5.3-codex-spark", "o3"]) {
+      assert.equal(entry.models.has(id), true)
+    }
     assert.equal(entry.models.has("gpt-5.5-pro"), false)
     for (const id of ["gpt-6.2-sol", "gpt-6.2-sol-fast", "gpt-6.2-astra", "gpt-6.2-astra-fast", "gpt-7-sol"]) {
       assert.equal(entry.models.has(id), true)

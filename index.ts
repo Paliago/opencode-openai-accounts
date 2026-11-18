@@ -39,15 +39,12 @@ function isPro(body: Readonly<Record<string, unknown>> | undefined) {
   return typeof reasoning === "object" && reasoning !== null && "mode" in reasoning && reasoning.mode === "pro"
 }
 
-function eligible(model: Model.Info, kind: Account["kind"]) {
+function eligible(model: Model.Info) {
   // Media generation does not run session HTTP hooks and cannot safely use this account binding.
   if (!model.enabled || (model.type !== undefined && model.type !== "chat") || isPro(model.body)) return false
   const id = model.modelID ?? model.id
   if (id === "gpt-5.6" || /-pro(?:-|$)/.test(id)) return false
-  const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/)
-  const major = Number(match?.[1])
-  const minimumMinor = kind === "token" ? 5 : 6
-  return major > 5 || (major === 5 && Number(match?.[2] ?? 0) >= minimumMinor)
+  return true
 }
 
 function contextLimit(model: Model.Info) {
@@ -124,7 +121,7 @@ export async function setup(context: Context) {
             store: false,
           },
         },
-        models: [...source.models.values()].filter((item) => eligible(item, account.kind)).map((item) => ({
+        models: [...source.models.values()].filter(eligible).map((item) => ({
           ...item,
           name: `${account.connection.label} - ${item.name}`,
           providerID: id,
