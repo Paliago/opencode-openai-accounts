@@ -6,12 +6,6 @@ import type { SessionHooks, SessionRequest } from "@opencode/plugin/promise/sess
 const nativePackage = "@opencode/ai/providers/openai"
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
 const tokenBaseURL = "https://api.openai.com/v1"
-const tokenSharingModels = new Set([
-  "gpt-5.5", "gpt-5.5-fast",
-  "gpt-5.6-luna", "gpt-5.6-luna-fast", "gpt-5.6-sol", "gpt-5.6-sol-fast", "gpt-5.6-terra", "gpt-5.6-terra-fast",
-  "gpt-6-astra", "gpt-6-astra-fast", "gpt-6-luna", "gpt-6-luna-fast", "gpt-6-sol", "gpt-6-sol-fast",
-  "gpt-6.1-sol", "gpt-6.1-sol-fast", "gpt-6.1-terra", "gpt-6.1-terra-fast",
-])
 
 type Context = {
   integration: Pick<Plugin.Context["integration"], "get"> & {
@@ -49,11 +43,11 @@ function eligible(model: Model.Info, kind: Account["kind"]) {
   // Media generation does not run session HTTP hooks and cannot safely use this account binding.
   if (!model.enabled || (model.type !== undefined && model.type !== "chat") || isPro(model.body)) return false
   const id = model.modelID ?? model.id
-  if (kind === "token") return tokenSharingModels.has(id)
-  if (id === "gpt-5.6") return false
+  if (id === "gpt-5.6" || /-pro(?:-|$)/.test(id)) return false
   const match = id.match(/^gpt-(\d+)(?:\.(\d+))?/)
   const major = Number(match?.[1])
-  return major > 5 || (major === 5 && Number(match?.[2] ?? 0) > 5)
+  const minimumMinor = kind === "token" ? 5 : 6
+  return major > 5 || (major === 5 && Number(match?.[2] ?? 0) >= minimumMinor)
 }
 
 function contextLimit(model: Model.Info) {

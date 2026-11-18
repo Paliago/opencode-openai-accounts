@@ -47,6 +47,7 @@ This is not a promise of compatibility with every future release. A breaking pub
 - Requests explicitly set `store: false` and omit output-token overrides for the agent loop, compaction, transient session generation, and titles.
 - Generic OpenAI models are hidden while at least one named account has available models. The integration and saved logins remain intact.
 - Model names, reasoning variants, and definitions come from OpenCode's catalog, filtered through subscription eligibility policy. Subscription pricing is zero; pro reasoning variants are excluded. Input caps are 500,000 for GPT-6.1 and newer and 272,000 for older models, without increasing smaller catalog limits.
+- New catalog GPT chat models appear automatically: token-sharing accounts include GPT-5.5 and newer, and legacy Codex accounts include GPT-5.6 and newer, excluding the bare `gpt-5.6` model. OpenAI enforces actual account entitlement; appearing in the catalog does not guarantee access.
 
 ## Supported scope
 

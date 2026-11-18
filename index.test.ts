@@ -404,7 +404,7 @@ test("mixed codex and token-sharing accounts use their own endpoints", async (t)
 test("subscription model eligibility and context caps apply independently to each account", async (t) => {
   const state = environment()
   state.credentials.set("cred_personal", tokenCredential("personal"))
-  for (const id of ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra-fast", "gpt-6.1-pro", "gpt-image-2"]) {
+  for (const id of ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra-fast", "gpt-6.2-sol", "gpt-6.2-sol-fast", "gpt-6.2-astra", "gpt-6.2-astra-fast", "gpt-7-sol", "gpt-6.1-pro", "gpt-image-2"]) {
     state.source.models.set(id, {
       ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make(id)),
       name: id,
@@ -421,9 +421,15 @@ test("subscription model eligibility and context caps apply independently to eac
   assert.equal(token.models.has("gpt-5.5"), true)
   assert.equal(codex.models.has("gpt-5.5"), false)
   assert.equal(codex.models.has("gpt-5.3-codex-spark"), false)
+  assert.equal(token.models.has("gpt-5.3-codex-spark"), false)
   assert.equal(token.models.has("gpt-image-2"), false)
   assert.equal(codex.models.has("gpt-image-2"), false)
   for (const entry of [token, codex]) {
+    assert.equal(entry.models.has("gpt-5.5-pro"), false)
+    for (const id of ["gpt-6.2-sol", "gpt-6.2-sol-fast", "gpt-6.2-astra", "gpt-6.2-astra-fast", "gpt-7-sol"]) {
+      assert.equal(entry.models.has(id), true)
+      assert.deepEqual(entry.models.get(id)?.limit, { input: 500_000, context: 628_000, output: 128_000 })
+    }
     assert.equal(entry.models.has("gpt-6.1-pro"), false)
     assert.equal(entry.models.has("gpt-6.1-terra"), true)
     assert.equal(entry.models.has("gpt-6.1-terra-fast"), true)
